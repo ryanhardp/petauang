@@ -123,6 +123,7 @@ export default function Home() {
   const setUserName = useStore((state) => state.setUserName);
   const resetAllData = useStore((state) => state.resetAllData);
   const importData = useStore((state) => state.importData);
+  const exportData = useStore((state) => state.exportData); // <-- INI FUNGSI BACKUP BARU LU
 
   const transactions = useStore((state) => state.transactions);
   const wallets = useStore((state) => state.wallets);
@@ -135,7 +136,7 @@ export default function Home() {
   const deleteTransaction = useStore((state) => state.deleteTransaction);
 
   const addWallet = useStore((state) => state.addWallet);
-  const deleteWallet = useStore((state) => state.deleteWallet); // FUNGSI BARU DIAMBIL DARI STORE
+  const deleteWallet = useStore((state) => state.deleteWallet);
 
   const addTarget = useStore((state) => state.addTarget);
   const updateTarget = useStore((state) => state.updateTarget);
@@ -210,12 +211,7 @@ export default function Home() {
     const url = URL.createObjectURL(blob);
     const link = document.createElement("a"); link.href = url; link.download = "Laporan_PetaUang_CSV.csv"; link.click();
   };
-  const handleExportJSON = () => {
-    const dataStr = JSON.stringify(transactions, null, 2);
-    const blob = new Blob([dataStr], { type: 'application/json' });
-    const url = URL.createObjectURL(blob);
-    const link = document.createElement("a"); link.href = url; link.download = "Laporan_PetaUang.json"; link.click();
-  };
+  
   const handlePrintPDF = () => window.print();
 
   const handleTypeChange = (type: "expense" | "income") => { setTxType(type); setCategory(type === "expense" ? "Makan" : "Gaji"); };
@@ -232,7 +228,6 @@ export default function Home() {
 
   const handleSaveWallet = () => { if (!newWalletName.trim()) return; addWallet(newWalletName); setNewWalletName(""); setIsWalletModalOpen(false); };
 
-  // HANDLER HAPUS DOMPET BARU
   const handleDeleteWallet = (id: string, name: string) => {
     if (window.confirm(`Yakin mau hapus dompet "${name}"? Tenang, riwayat transaksinya tetep aman kok di laporan.`)) {
       deleteWallet(id);
@@ -434,7 +429,7 @@ export default function Home() {
               <h3 className="text-sm font-bold text-zinc-300 mb-3 px-1">Export Data Laporan</h3>
               <div className="grid grid-cols-1 gap-3">
                 <button onClick={handleExportCSV} className="flex items-center justify-between bg-zinc-900 hover:bg-zinc-800 border border-zinc-800 p-4 rounded-2xl transition"><div className="flex items-center gap-3"><div className="text-green-500 bg-green-500/10 p-2 rounded-xl"><Download size={20} /></div><div className="text-left"><p className="text-sm font-bold text-white">Export ke CSV / Excel</p><p className="text-[10px] text-zinc-500">Download data mentah spreadsheet</p></div></div><ChevronRight size={16} className="text-zinc-600" /></button>
-                <button onClick={handleExportJSON} className="flex items-center justify-between bg-zinc-900 hover:bg-zinc-800 border border-zinc-800 p-4 rounded-2xl transition"><div className="flex items-center gap-3"><div className="text-yellow-500 bg-yellow-500/10 p-2 rounded-xl"><FileJson size={20} /></div><div className="text-left"><p className="text-sm font-bold text-white">Export JSON</p><p className="text-[10px] text-zinc-500">Backup database lengkap</p></div></div><ChevronRight size={16} className="text-zinc-600" /></button>
+                <button onClick={exportData} className="flex items-center justify-between bg-zinc-900 hover:bg-zinc-800 border border-zinc-800 p-4 rounded-2xl transition"><div className="flex items-center gap-3"><div className="text-yellow-500 bg-yellow-500/10 p-2 rounded-xl"><FileJson size={20} /></div><div className="text-left"><p className="text-sm font-bold text-white">Export JSON</p><p className="text-[10px] text-zinc-500">Backup database lengkap</p></div></div><ChevronRight size={16} className="text-zinc-600" /></button>
                 <button onClick={handlePrintPDF} className="flex items-center justify-between bg-zinc-900 hover:bg-zinc-800 border border-zinc-800 p-4 rounded-2xl transition"><div className="flex items-center gap-3"><div className="text-blue-500 bg-blue-500/10 p-2 rounded-xl"><Printer size={20} /></div><div className="text-left"><p className="text-sm font-bold text-white">Cetak / Save as PDF</p><p className="text-[10px] text-zinc-500">Pilih "Save as PDF" di popup print</p></div></div><ChevronRight size={16} className="text-zinc-600" /></button>
               </div>
             </section>
