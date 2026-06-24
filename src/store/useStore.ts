@@ -52,32 +52,39 @@ interface AppState {
   debts: DebtData[];
   recurrings: RecurringData[];
 
-  // FUNGSI PENGATURAN PROFIL, RESET, & IMPORT
+  // FUNGSI PENGATURAN PROFIL, RESET, & BACKUP DATA
   setUserName: (name: string) => void;
   resetAllData: () => void;
-  importData: (data: Partial<AppState> | Transaction[]) => void;
+  importData: (data: any) => void;
+  exportData: () => void; // FITUR BARU: Tinggal panggil ini buat download backup!
 
+  // TRANSAKSI
   addTransaction: (tx: Omit<Transaction, 'id'>) => void;
   updateTransaction: (id: string, tx: Omit<Transaction, 'id'>) => void;
   deleteTransaction: (id: string) => void;
 
+  // DOMPET
   addWallet: (name: string) => void;
-  deleteWallet: (id: string) => void; // FITUR BARU: Hapus Dompet
+  deleteWallet: (id: string) => void;
 
+  // TARGET
   addTarget: (target: Omit<TargetData, 'id'>) => void;
   updateTarget: (id: string, target: Omit<TargetData, 'id'>) => void;
   deleteTarget: (id: string) => void;
 
+  // UTANG
   addDebt: (debt: Omit<DebtData, 'id'>) => void;
   updateDebt: (id: string, debt: Omit<DebtData, 'id'>) => void;
   deleteDebt: (id: string) => void;
   payDebt: (id: string, walletName: string, amount: number) => void;
 
+  // RUTIN
   addRecurring: (rec: Omit<RecurringData, 'id' | 'lastProcessedMonth'>) => void;
   updateRecurring: (id: string, rec: Partial<RecurringData>) => void;
   deleteRecurring: (id: string) => void;
   checkAndProcessRecurring: () => void;
 
+  // KALKULASI
   getTotalBalance: () => number;
   getMonthlyIncome: () => number;
   getMonthlyExpense: () => number;
@@ -100,28 +107,65 @@ export const useStore = create<AppState>()(
       debts: [],
       recurrings: [],
 
-      setUserName: (name) =>
-        set({ userName: name }),
+      setUserName: (name) => set({ userName: name }),
 
       resetAllData: () =>
         set({
           transactions: [],
           targets: [],
           debts: [],
-          recurrings: []
+          recurrings: [],
+          wallets: [
+            { id: '1', name: 'Tunai' },
+            { id: '2', name: 'BCA' },
+            { id: '3', name: 'Mandiri' }
+          ] // Balikin dompet ke default kalau di-reset
         }),
 
+      // FUNGSI EXPORT (Udah di-handle langsung sama Zustand biar aman)
+      exportData: () => {
+        if (typeof window === 'undefined') return; // Cek aman biar nggak error di Next.js
+
+        const state = get();
+        const fullData = {
+          userName: state.userName,
+          transactions: state.transactions,
+          wallets: state.wallets,
+          targets: state.targets,
+          debts: state.debts,
+          recurrings: state.recurrings,
+        };
+
+        const dataStr = JSON.stringify(fullData, null, 2);
+        const blob = new Blob([dataStr], { type: "application/json" });
+        const url = URL.createObjectURL(blob);
+        
+        const link = document.createElement("a");
+        link.href = url;
+        const today = new Date().toISOString().split('T')[0];
+        link.download = `PetaUang_Backup_${today}.json`;
+        document.body.appendChild(link);
+        link.click();
+        document.body.removeChild(link);
+        URL.revokeObjectURL(url);
+      },
+
+      // FUNGSI IMPORT (Udah dibikin anti-gagal, dompet baru pasti masuk)
       importData: (data) => {
+        if (!data) return;
+
         if (Array.isArray(data)) {
+          // Format lama (cuma transaksi)
           set({ transactions: data });
         } else {
+          // Format baru (semua data termasuk dompet)
           set((state) => ({
-            userName: data.userName || state.userName,
-            transactions: data.transactions || state.transactions,
-            wallets: data.wallets || state.wallets,
-            targets: data.targets || state.targets,
-            debts: data.debts || state.debts,
-            recurrings: data.recurrings || state.recurrings,
+            userName: data.userName !== undefined ? data.userName : state.userName,
+            transactions: data.transactions !== undefined ? data.transactions : state.transactions,
+            wallets: data.wallets !== undefined ? data.wallets : state.wallets,
+            targets: data.targets !== undefined ? data.targets : state.targets,
+            debts: data.debts !== undefined ? data.debts : state.debts,
+            recurrings: data.recurrings !== undefined ? data.recurrings : state.recurrings,
           }));
         }
       },
