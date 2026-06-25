@@ -1,5 +1,6 @@
 import { create } from 'zustand';
 import { persist } from 'zustand/middleware';
+import { supabase } from '../lib/supabase'; // <-- JEMBATAN SUPABASE
 
 export interface Transaction {
   id: string;
@@ -37,11 +38,11 @@ export interface RecurringData {
   id: string;
   type: 'expense' | 'income';
   amount: number;
-  day: number; // Tanggal berapa dia rutin muncul (1 - 31)
+  day: number;
   wallet: string;
   category: string;
   note: string;
-  lastProcessedMonth: string; // Penanda biar nggak kecatat dobel
+  lastProcessedMonth: string;
 }
 
 interface AppState {
@@ -52,44 +53,44 @@ interface AppState {
   debts: DebtData[];
   recurrings: RecurringData[];
 
-  // FUNGSI PENGATURAN PROFIL, RESET, & BACKUP DATA
   setUserName: (name: string) => void;
   resetAllData: () => void;
   importData: (data: any) => void;
-  exportData: () => void; // FITUR BARU: Tinggal panggil ini buat download backup!
+  exportData: () => void;
 
-  // TRANSAKSI
   addTransaction: (tx: Omit<Transaction, 'id'>) => void;
   updateTransaction: (id: string, tx: Omit<Transaction, 'id'>) => void;
   deleteTransaction: (id: string) => void;
 
-  // DOMPET
   addWallet: (name: string) => void;
   deleteWallet: (id: string) => void;
 
-  // TARGET
   addTarget: (target: Omit<TargetData, 'id'>) => void;
   updateTarget: (id: string, target: Omit<TargetData, 'id'>) => void;
   deleteTarget: (id: string) => void;
 
-  // UTANG
   addDebt: (debt: Omit<DebtData, 'id'>) => void;
   updateDebt: (id: string, debt: Omit<DebtData, 'id'>) => void;
   deleteDebt: (id: string) => void;
   payDebt: (id: string, walletName: string, amount: number) => void;
 
-  // RUTIN
   addRecurring: (rec: Omit<RecurringData, 'id' | 'lastProcessedMonth'>) => void;
   updateRecurring: (id: string, rec: Partial<RecurringData>) => void;
   deleteRecurring: (id: string) => void;
   checkAndProcessRecurring: () => void;
 
-  // KALKULASI
   getTotalBalance: () => number;
   getMonthlyIncome: () => number;
   getMonthlyExpense: () => number;
   getWalletBalance: (walletName: string) => number;
 }
+
+// Fungsi pembantu buat bikin ID berformat UUID yang disetujui Supabase
+const generateUUID = () => {
+  return typeof crypto !== 'undefined' && crypto.randomUUID
+    ? crypto.randomUUID()
+    : 'xxxx-xxxx-xxxx-xxxx'.replace(/[x]/g, () => (Math.random() * 16 | 0).toString(16));
+};
 
 export const useStore = create<AppState>()(
   persist(
@@ -97,12 +98,12 @@ export const useStore = create<AppState>()(
       userName: "PetaUang",
       transactions: [],
       wallets: [
-        { id: '1', name: 'Tunai' },
-        { id: '2', name: 'BCA' },
-        { id: '3', name: 'Mandiri' }
+        { id: generateUUID(), name: 'Tunai' },
+        { id: generateUUID(), name: 'BCA' },
+        { id: generateUUID(), name: 'Mandiri' }
       ],
       targets: [
-        { id: '1', name: 'Dana Darurat', targetAmount: 10000000, collectedAmount: 3500000 }
+        { id: generateUUID(), name: 'Dana Darurat', targetAmount: 10000000, collectedAmount: 3500000 }
       ],
       debts: [],
       recurrings: [],
@@ -116,16 +117,14 @@ export const useStore = create<AppState>()(
           debts: [],
           recurrings: [],
           wallets: [
-            { id: '1', name: 'Tunai' },
-            { id: '2', name: 'BCA' },
-            { id: '3', name: 'Mandiri' }
-          ] // Balikin dompet ke default kalau di-reset
+            { id: generateUUID(), name: 'Tunai' },
+            { id: generateUUID(), name: 'BCA' },
+            { id: generateUUID(), name: 'Mandiri' }
+          ]
         }),
 
-      // FUNGSI EXPORT (Udah di-handle langsung sama Zustand biar aman)
       exportData: () => {
-        if (typeof window === 'undefined') return; // Cek aman biar nggak error di Next.js
-
+        if (typeof window === 'undefined') return;
         const state = get();
         const fullData = {
           userName: state.userName,
@@ -135,11 +134,9 @@ export const useStore = create<AppState>()(
           debts: state.debts,
           recurrings: state.recurrings,
         };
-
         const dataStr = JSON.stringify(fullData, null, 2);
         const blob = new Blob([dataStr], { type: "application/json" });
         const url = URL.createObjectURL(blob);
-        
         const link = document.createElement("a");
         link.href = url;
         const today = new Date().toISOString().split('T')[0];
@@ -150,15 +147,11 @@ export const useStore = create<AppState>()(
         URL.revokeObjectURL(url);
       },
 
-      // FUNGSI IMPORT (Udah dibikin anti-gagal, dompet baru pasti masuk)
       importData: (data) => {
         if (!data) return;
-
         if (Array.isArray(data)) {
-          // Format lama (cuma transaksi)
           set({ transactions: data });
         } else {
-          // Format baru (semua data termasuk dompet)
           set((state) => ({
             userName: data.userName !== undefined ? data.userName : state.userName,
             transactions: data.transactions !== undefined ? data.transactions : state.transactions,
@@ -170,9 +163,10 @@ export const useStore = create<AppState>()(
         }
       },
 
+      // CONTOH INJEKSI: Tiap kali lu nyimpen, dia nge-generate UUID biar siap dikirim ke Cloud
       addTransaction: (tx) =>
         set((state) => ({
-          transactions: [{ ...tx, id: Date.now().toString() }, ...state.transactions],
+          transactions: [{ ...tx, id: generateUUID() }, ...state.transactions],
         })),
 
       updateTransaction: (id, updatedTx) =>
@@ -189,7 +183,7 @@ export const useStore = create<AppState>()(
 
       addWallet: (name) =>
         set((state) => ({
-          wallets: [...state.wallets, { id: Date.now().toString(), name }]
+          wallets: [...state.wallets, { id: generateUUID(), name }]
         })),
 
       deleteWallet: (id) =>
@@ -199,7 +193,7 @@ export const useStore = create<AppState>()(
 
       addTarget: (target) =>
         set((state) => ({
-          targets: [...state.targets, { ...target, id: Date.now().toString() }]
+          targets: [...state.targets, { ...target, id: generateUUID() }]
         })),
 
       updateTarget: (id, updatedTarget) =>
@@ -216,7 +210,7 @@ export const useStore = create<AppState>()(
 
       addDebt: (debt) =>
         set((state) => ({
-          debts: [...state.debts, { ...debt, id: Date.now().toString() }]
+          debts: [...state.debts, { ...debt, id: generateUUID() }]
         })),
 
       updateDebt: (id, updatedDebt) =>
@@ -247,7 +241,7 @@ export const useStore = create<AppState>()(
         });
 
         const newTransaction: Transaction = {
-          id: Date.now().toString(),
+          id: generateUUID(),
           type: debt.type === 'payable' ? 'expense' : 'income',
           amount: amount,
           date: new Date().toISOString().split('T')[0],
@@ -265,7 +259,7 @@ export const useStore = create<AppState>()(
 
       addRecurring: (rec) =>
         set((state) => ({
-          recurrings: [...state.recurrings, { ...rec, id: Date.now().toString(), lastProcessedMonth: "" }]
+          recurrings: [...state.recurrings, { ...rec, id: generateUUID(), lastProcessedMonth: "" }]
         })),
 
       updateRecurring: (id, updatedRec) =>
@@ -292,9 +286,8 @@ export const useStore = create<AppState>()(
         const updatedRecurrings = state.recurrings.map(r => {
           if (currentDay >= r.day && r.lastProcessedMonth !== currentMonthKey) {
             hasChanges = true;
-
             newTransactions.push({
-              id: Date.now().toString() + Math.random().toString(36).substr(2, 5),
+              id: generateUUID(),
               type: r.type,
               amount: r.amount,
               date: `${currentMonthKey}-${String(r.day).padStart(2, '0')}`,
@@ -303,7 +296,6 @@ export const useStore = create<AppState>()(
               note: `[Rutin] ${r.note}`,
               isRecurring: true
             });
-
             return { ...r, lastProcessedMonth: currentMonthKey };
           }
           return r;

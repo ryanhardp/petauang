@@ -16,7 +16,6 @@ import {
   Plus,
   X,
   PieChart,
-  Users,
   Repeat,
   LayoutGrid,
   Target,
@@ -30,15 +29,16 @@ import {
   HandCoins,
   CheckCircle2,
   Banknote,
-  Download,
-  FileJson,
   Printer,
   CalendarCheck,
   Clock,
   AlertTriangle,
-  Upload
+  Cloud,
+  Lock,
+  KeyRound
 } from "lucide-react";
 import { useStore, Transaction, TargetData, DebtData, RecurringData } from "../store/useStore";
+import { supabase } from "../lib/supabase"; 
 
 const EXPENSE_CATEGORIES = [
   { id: "makan", icon: Utensils, label: "Makan", color: "text-orange-400", bg: "bg-orange-400/20", bar: "bg-orange-500" },
@@ -70,6 +70,12 @@ export default function Home() {
   const [activeTab, setActiveTab] = useState("Beranda");
 
   const [currentDate, setCurrentDate] = useState(new Date());
+
+  // --- FILTER TANGGAL KHUSUS LAPORAN PDF ---
+  const getFirstDay = () => { const d = new Date(); d.setDate(1); return d.toISOString().split('T')[0]; };
+  const getLastDay = () => { const d = new Date(); d.setMonth(d.getMonth() + 1); d.setDate(0); return d.toISOString().split('T')[0]; };
+  const [reportStartDate, setReportStartDate] = useState(getFirstDay());
+  const [reportEndDate, setReportEndDate] = useState(getLastDay());
 
   const [isModalOpen, setIsModalOpen] = useState(false);
   const [editingId, setEditingId] = useState<string | null>(null);
@@ -118,12 +124,20 @@ export default function Home() {
   const [isSettingsModalOpen, setIsSettingsModalOpen] = useState(false);
   const [tempUserName, setTempUserName] = useState("");
 
+  // --- STATE UNTUK SUPABASE AUTH ---
+  const [user, setUser] = useState<any>(null);
+  const [authUsername, setAuthUsername] = useState("");
+  const [authPassword, setAuthPassword] = useState("");
+  const [newPassword, setNewPassword] = useState("");
+  const [showPasswordMenu, setShowPasswordMenu] = useState(false);
+  const [isAuthLoading, setIsAuthLoading] = useState(false);
+  const [isSyncing, setIsSyncing] = useState(false); 
+  const [isAdminMode, setIsAdminMode] = useState(false); 
+
   // ZUSTAND STORE
   const userName = useStore((state) => state.userName);
   const setUserName = useStore((state) => state.setUserName);
   const resetAllData = useStore((state) => state.resetAllData);
-  const importData = useStore((state) => state.importData);
-  const exportData = useStore((state) => state.exportData); // <-- INI FUNGSI BACKUP BARU LU
 
   const transactions = useStore((state) => state.transactions);
   const wallets = useStore((state) => state.wallets);
@@ -155,6 +169,7 @@ export default function Home() {
   const totalBalance = useStore((state) => state.getTotalBalance());
   const getWalletBalance = useStore((state) => state.getWalletBalance);
 
+  // --- CEK SESI LOGIN SAAT APLIKASI DIBUKA ---
   useEffect(() => {
     setIsMounted(true);
     checkAndProcessRecurring();
@@ -162,15 +177,215 @@ export default function Home() {
       setWallet(wallets[0].name);
       setRecWallet(wallets[0].name);
     }
+
+    supabase.auth.getSession().then(({ data: { session } }) => {
+      setUser(session?.user ?? null);
+    });
+
+    const { data: { subscription } } = supabase.auth.onAuthStateChange((_event, session) => {
+      setUser(session?.user ?? null);
+    });
+
+    return () => subscription.unsubscribe();
   }, [wallets, wallet, checkAndProcessRecurring]);
 
   useEffect(() => {
-    if (isDebtModalOpen && !editingDebtId) {
+    if (isDebtModalOpen && !editingDebtId && debtType === "payable") {
       const inst = parseRupiah(debtInstallmentInput) || 0;
       const ten = Number(debtTenureInput) || 0;
       setDebtAmountInput(formatRupiah(inst * ten));
     }
-  }, [debtInstallmentInput, debtTenureInput, isDebtModalOpen, editingDebtId]);
+  }, [debtInstallmentInput, debtTenureInput, isDebtModalOpen, editingDebtId, debtType]);
+
+  // --- AUTO SYNC (UPLOAD) ENGINE ---
+  useEffect(() => {
+    if (user && isMounted) {
+      const timer = setTimeout(() => {
+        handleSyncToCloud(true); 
+      }, 2000); 
+      return () => clearTimeout(timer);
+    }
+  }, [transactions, wallets, targets, debts, recurrings]);
+
+  // --- FUNGSI TARIK DATA DARI CLOUD (DOWNLOAD) ---
+  const fetchFromCloud = async (userId: string) => {
+    setIsSyncing(true);
+    try {
+      // 1. Tarik Dompet
+      const { data: wData } = await supabase.from('wallets').select('*').eq('user_id', userId);
+      const fetchedWallets = wData && wData.length > 0 ? wData.map(w => ({ id: w.id, name: w.name })) : [];
+      
+      // 2. Tarik Transaksi
+      const { data: tData } = await supabase.from('transactions').select('*').eq('user_id', userId);
+      const fetchedTxs = tData ? tData.map(t => {
+        const wName = fetchedWallets.find(w => w.id === t.wallet_id)?.name || "Tunai";
+        return { id: t.id, type: t.type, amount: t.amount, date: t.date, wallet: wName, category: t.category, note: t.description, isRecurring: false };
+      }) : [];
+
+      // 3. Tarik Target
+      const { data: trData } = await supabase.from('targets').select('*').eq('user_id', userId);
+      const fetchedTargets = trData ? trData.map(t => ({ id: t.id, name: t.name, targetAmount: t.target_amount, collectedAmount: t.collected_amount })) : [];
+
+      // 4. Tarik Utang
+      const { data: dData } = await supabase.from('debts').select('*').eq('user_id', userId);
+      const fetchedDebts = dData ? dData.map(d => ({ id: d.id, type: d.type as any, name: d.name, amount: d.amount, installment: d.installment, tenure: d.tenure })) : [];
+
+      // 5. Tarik Rutin
+      const { data: rData } = await supabase.from('recurrings').select('*').eq('user_id', userId);
+      const fetchedRecs = rData ? rData.map(r => {
+        const wName = fetchedWallets.find(w => w.id === r.wallet_id)?.name || "Tunai";
+        return { id: r.id, type: r.type as any, amount: r.amount, day: r.day, wallet: wName, category: r.category, note: r.note, lastProcessedMonth: r.last_processed_month };
+      }) : [];
+
+      // TIMPA DATA LOKAL DENGAN DATA DARI CLOUD
+      useStore.setState({
+        wallets: fetchedWallets.length > 0 ? fetchedWallets : [{ id: Date.now().toString(), name: 'Tunai' }],
+        transactions: fetchedTxs.sort((a,b) => new Date(b.date).getTime() - new Date(a.date).getTime()), // Urutkan terbaru
+        targets: fetchedTargets,
+        debts: fetchedDebts,
+        recurrings: fetchedRecs
+      });
+      
+    } catch (e) {
+      console.error("Gagal menarik data dari cloud:", e);
+    } finally {
+      setIsSyncing(false);
+    }
+  };
+
+  // --- FUNGSI AUTHENTICATION ---
+  const toggleAdminMode = () => {
+    if (!isAdminMode) {
+      const pin = prompt("Masukkan PIN Rahasia Owner:");
+      if (pin === "160401") { 
+        setIsAdminMode(true);
+      } else {
+        alert("PIN Salah! Akses ditolak.");
+      }
+    } else {
+      setIsAdminMode(false);
+    }
+  };
+
+  const handleRegister = async () => {
+    if (!authUsername || !authPassword) return alert("Isi User ID & Password dulu bro!");
+    setIsAuthLoading(true);
+    const fakeEmail = `${authUsername.trim().toLowerCase().replace(/\s+/g, '')}@petauang.app`;
+    const { error } = await supabase.auth.signUp({ email: fakeEmail, password: authPassword });
+    setIsAuthLoading(false);
+    if (error) alert("Gagal Buat Akun Klien: " + error.message);
+    else {
+      alert(`AKUN KLIEN BERHASIL DIBUAT!\n\nUser ID: ${authUsername}\n\nSilakan kasih info login ini ke pembeli lu.`);
+      setAuthPassword("");
+      setAuthUsername("");
+      setIsAdminMode(false);
+    }
+  };
+
+  const handleLogin = async () => {
+    if (!authUsername || !authPassword) return alert("Isi User ID & Password dulu ya!");
+    setIsAuthLoading(true);
+    const fakeEmail = `${authUsername.trim().toLowerCase().replace(/\s+/g, '')}@petauang.app`;
+    const { data, error } = await supabase.auth.signInWithPassword({ email: fakeEmail, password: authPassword });
+    setIsAuthLoading(false);
+    if (error) alert("Gagal Login: User ID atau Password salah!");
+    else {
+      alert("Berhasil Login! Sedang menyinkronkan data dari Cloud...");
+      if(data.user) {
+        await fetchFromCloud(data.user.id);
+      }
+    }
+  };
+
+  const handleLogout = async () => {
+    if(window.confirm("Yakin mau keluar? (Data di layar bakal dibersihin sementara buat privasi. Login lagi buat munculin datanya!)")) {
+      await supabase.auth.signOut();
+      resetAllData(); // Bersihin layar lokal
+      setShowPasswordMenu(false);
+    }
+  };
+
+  const handleChangePassword = async () => {
+    if(!newPassword) return alert("Isi password baru dulu!");
+    const { error } = await supabase.auth.updateUser({ password: newPassword });
+    if(error) alert("Gagal ganti password: " + error.message);
+    else {
+      alert("Password sukses diganti! Jangan lupa ya.");
+      setNewPassword("");
+      setShowPasswordMenu(false);
+    }
+  };
+
+  // --- FUNGSI SYNC KE CLOUD (UPLOAD) ---
+  const handleSyncToCloud = async (isSilent = false) => {
+    if (!user) return;
+    if (!isSilent) setIsSyncing(true);
+
+    try {
+      let dbWallets: any[] = [];
+
+      if (wallets.length > 0) {
+        const walletsData = wallets.map(w => ({
+          id: w.id, user_id: user.id, name: w.name
+        }));
+        const { data, error } = await supabase.from('wallets').upsert(walletsData).select('id, name');
+        if (error) throw new Error("Gagal upload dompet: " + error.message);
+        dbWallets = data || walletsData; 
+      } else {
+        if(!isSilent) throw new Error("Lu belum punya dompet sama sekali. Bikin dompet dulu 1 biji minimal!");
+        else return;
+      }
+
+      if (transactions.length > 0) {
+        const txsData = transactions.map(tx => {
+          const matchedWallet = dbWallets.find(w => w.name === tx.wallet);
+          return {
+            id: tx.id, user_id: user.id, 
+            wallet_id: matchedWallet ? matchedWallet.id : dbWallets[0].id, 
+            type: tx.type, amount: tx.amount, category: tx.category, 
+            description: tx.note, date: tx.date
+          };
+        });
+        const { error } = await supabase.from('transactions').upsert(txsData);
+        if (error) throw new Error("Gagal upload transaksi: " + error.message);
+      }
+
+      if (targets.length > 0) {
+        const targetsData = targets.map(t => ({
+          id: t.id, user_id: user.id, name: t.name, target_amount: t.targetAmount, collected_amount: t.collectedAmount
+        }));
+        const { error } = await supabase.from('targets').upsert(targetsData);
+        if (error) throw new Error("Gagal upload target: " + error.message);
+      }
+
+      if (debts.length > 0) {
+        const debtsData = debts.map(d => ({
+          id: d.id, user_id: user.id, type: d.type, name: d.name, amount: d.amount, installment: d.installment, tenure: d.tenure
+        }));
+        const { error } = await supabase.from('debts').upsert(debtsData);
+        if (error) throw new Error("Gagal upload utang: " + error.message);
+      }
+
+      if (recurrings.length > 0) {
+        const recData = recurrings.map(r => {
+          const matchedWallet = dbWallets.find(w => w.name === r.wallet);
+          return {
+            id: r.id, user_id: user.id, type: r.type, amount: r.amount, day: r.day,
+            wallet_id: matchedWallet ? matchedWallet.id : dbWallets[0].id, 
+            category: r.category, note: r.note, last_processed_month: r.lastProcessedMonth
+          };
+        });
+        const { error } = await supabase.from('recurrings').upsert(recData);
+        if (error) throw new Error("Gagal upload rutin: " + error.message);
+      }
+
+      if (!isSilent) alert("GOKIL! Semua data lokal lu udah terbang dan tersimpan aman di Cloud Supabase!");
+    } catch (err: any) {
+      if (!isSilent) alert("Waduh, gagal sync bro: " + err.message);
+    } finally {
+      if (!isSilent) setIsSyncing(false);
+    }
+  };
 
   const handlePrevMonth = () => setCurrentDate(new Date(currentDate.getFullYear(), currentDate.getMonth() - 1, 1));
   const handleNextMonth = () => setCurrentDate(new Date(currentDate.getFullYear(), currentDate.getMonth() + 1, 1));
@@ -178,40 +393,32 @@ export default function Home() {
   const monthNames = ["Januari", "Februari", "Maret", "April", "Mei", "Juni", "Juli", "Agustus", "September", "Oktober", "November", "Desember"];
   const displayMonth = `${monthNames[currentDate.getMonth()]} ${currentDate.getFullYear()}`;
 
+  // Filtering KHUSUS BERANDA & RIWAYAT TRANSAKSI (Bulan Ini Saja)
   const currentMonthTx = transactions.filter(tx => {
     const txDate = new Date(tx.date);
     return txDate.getMonth() === currentDate.getMonth() && txDate.getFullYear() === currentDate.getFullYear();
   });
-
   const currentIncome = currentMonthTx.filter(tx => tx.type === 'income').reduce((sum, tx) => sum + tx.amount, 0);
   const currentExpense = currentMonthTx.filter(tx => tx.type === 'expense').reduce((sum, tx) => sum + tx.amount, 0);
+  const expenseByCategory = EXPENSE_CATEGORIES.map(cat => {
+    const amount = currentMonthTx.filter(tx => tx.type === "expense" && tx.category === cat.label).reduce((sum, tx) => sum + tx.amount, 0);
+    return { ...cat, amount };
+  }).filter(c => c.amount > 0).sort((a, b) => b.amount - a.amount);
 
-  const handleFileImport = (e: React.ChangeEvent<HTMLInputElement>) => {
-    const file = e.target.files?.[0];
-    if (!file) return;
+  // Filtering KHUSUS LAPORAN PDF (Sesuai Tanggal Pilihan)
+  const reportTransactions = transactions.filter(tx => {
+    const txD = new Date(tx.date);
+    const sD = new Date(reportStartDate); sD.setHours(0,0,0,0);
+    const eD = new Date(reportEndDate); eD.setHours(23,59,59,999);
+    return txD >= sD && txD <= eD;
+  });
+  const reportIncome = reportTransactions.filter(tx => tx.type === 'income').reduce((sum, tx) => sum + tx.amount, 0);
+  const reportExpense = reportTransactions.filter(tx => tx.type === 'expense').reduce((sum, tx) => sum + tx.amount, 0);
+  const reportExpenseByCategory = EXPENSE_CATEGORIES.map(cat => {
+    const amount = reportTransactions.filter(tx => tx.type === "expense" && tx.category === cat.label).reduce((sum, tx) => sum + tx.amount, 0);
+    return { ...cat, amount };
+  }).filter(c => c.amount > 0).sort((a, b) => b.amount - a.amount);
 
-    const reader = new FileReader();
-    reader.onload = (event) => {
-      try {
-        const parsed = JSON.parse(event.target?.result as string);
-        importData(parsed);
-        alert("Sip mantap! Backup data berhasil dipulihkan total.");
-        setIsSettingsModalOpen(false);
-      } catch (err) {
-        alert("Waduh, file JSON rusak atau formatnya salah bro!");
-      }
-    };
-    reader.readAsText(file);
-  };
-
-  const handleExportCSV = () => {
-    const headers = "Tanggal,Tipe,Kategori,Nominal,Dompet,Catatan\n";
-    const rows = transactions.map(t => `${t.date},${t.type === 'income' ? 'Pemasukan' : 'Pengeluaran'},${t.category},${t.amount},${t.wallet},"${t.note}"`).join("\n");
-    const blob = new Blob([headers + rows], { type: 'text/csv;charset=utf-8;' });
-    const url = URL.createObjectURL(blob);
-    const link = document.createElement("a"); link.href = url; link.download = "Laporan_PetaUang_CSV.csv"; link.click();
-  };
-  
   const handlePrintPDF = () => window.print();
 
   const handleTypeChange = (type: "expense" | "income") => { setTxType(type); setCategory(type === "expense" ? "Makan" : "Gaji"); };
@@ -253,17 +460,35 @@ export default function Home() {
   const handleOpenAddDebt = () => { setEditingDebtId(null); setDebtType("payable"); setDebtName(""); setDebtInstallmentInput(""); setDebtTenureInput(""); setIsDebtModalOpen(true); };
   const handleEditDebtClick = (d: DebtData) => { setEditingDebtId(d.id); setDebtType(d.type); setDebtName(d.name); setDebtAmountInput(formatRupiah(d.amount)); setDebtInstallmentInput(formatRupiah(d.installment)); setDebtTenureInput(String(d.tenure)); setIsDebtModalOpen(true); };
   const handleSaveDebt = () => {
-    const numAmount = parseRupiah(debtAmountInput); const numInst = parseRupiah(debtInstallmentInput) || 0; const numTenure = Number(debtTenureInput) || 0;
+    const numAmount = parseRupiah(debtAmountInput); 
+    let numInst = parseRupiah(debtInstallmentInput) || 0; 
+    let numTenure = Number(debtTenureInput) || 0;
+    if(debtType === "receivable") {
+      numInst = numAmount; 
+      numTenure = 1;       
+    }
+
     if (!debtName.trim() || !numAmount) return alert("Wajib isi!");
     const debtData = { type: debtType, name: debtName, amount: numAmount, installment: numInst, tenure: numTenure };
     if (editingDebtId) updateDebt(editingDebtId, debtData); else addDebt(debtData);
     setIsDebtModalOpen(false);
   };
   const handleLunasinDebt = (id: string) => { if (window.confirm("Yakin lunas?")) { deleteDebt(id); setIsDebtModalOpen(false); } };
-  const handleOpenPayDebt = (d: DebtData) => { setPayDebtId(d.id); setPayDebtAmountInput(formatRupiah(d.installment)); setPayDebtWallet(wallets.length > 0 ? wallets[0].name : "Tunai"); setIsPayDebtModalOpen(true); };
+  
+  const handleOpenPayDebt = (d: DebtData) => { 
+    setPayDebtId(d.id); 
+    setPayDebtWallet(wallets.length > 0 ? wallets[0].name : "Tunai");
+    if(d.type === 'receivable') {
+      setPayDebtAmountInput(formatRupiah(d.amount));
+    } else {
+      setPayDebtAmountInput(formatRupiah(d.installment)); 
+    }
+    setIsPayDebtModalOpen(true); 
+  };
+  
   const handleSavePayDebt = () => {
     const numAmount = parseRupiah(payDebtAmountInput); if (!numAmount) return;
-    payDebt(payDebtId!, payDebtWallet, numAmount); setIsPayDebtModalOpen(false); alert("Cicilan berhasil dibayar!");
+    payDebt(payDebtId!, payDebtWallet, numAmount); setIsPayDebtModalOpen(false); alert("Pembayaran berhasil dicatat!");
   };
 
   const handleRecTypeChange = (type: "expense" | "income") => { setRecType(type); setRecCategory(type === "expense" ? "Tagihan" : "Gaji"); };
@@ -297,16 +522,11 @@ export default function Home() {
   const payableDebts = debts.filter(d => d.type === "payable");
   const receivableDebts = debts.filter(d => d.type === "receivable");
 
-  const expenseByCategory = EXPENSE_CATEGORIES.map(cat => {
-    const amount = currentMonthTx.filter(tx => tx.type === "expense" && tx.category === cat.label).reduce((sum, tx) => sum + tx.amount, 0);
-    return { ...cat, amount };
-  }).filter(c => c.amount > 0).sort((a, b) => b.amount - a.amount);
-
   if (!isMounted) return null;
 
   return (
     <div className="min-h-screen bg-[#09090b] text-zinc-100 font-sans pb-24 selection:bg-yellow-500/30 print:bg-white print:text-black">
-      <div className="max-w-md mx-auto relative min-h-screen bg-[#09090b] shadow-2xl overflow-hidden border-x border-zinc-900/50 print:border-none print:shadow-none print:bg-white">
+      <div className="max-w-md mx-auto relative min-h-screen bg-[#09090b] shadow-2xl overflow-hidden border-x border-zinc-900/50 print:border-none print:shadow-none print:bg-white print:max-w-full">
 
         {/* --- HEADER --- */}
         <header className="px-5 pt-6 pb-2 sticky top-0 bg-[#09090b]/80 backdrop-blur-md z-30 print:hidden">
@@ -379,33 +599,46 @@ export default function Home() {
         {/* --- HALAMAN LAPORAN --- */}
         {activeTab === "Laporan" && (
           <main className="px-5 pt-4 space-y-6 print:px-0 print:pt-0">
-            <div className="flex justify-between items-center mb-2 print:hidden"><h2 className="text-lg font-bold text-white">Laporan {displayMonth}</h2></div>
-            <div className="hidden print:block mb-6 text-black">
-              <h1 className="text-2xl font-bold border-b pb-2 mb-2">Laporan Keuangan: {userName}</h1><p className="text-sm text-gray-600">Periode: {displayMonth}</p>
+            <div className="flex justify-between items-center mb-4 print:hidden"><h2 className="text-lg font-bold text-white">Laporan Keuangan</h2></div>
+            
+            {/* Filter Tanggal (Cuma muncul di layar, dihilangkan saat print PDF) */}
+            <div className="bg-zinc-900 border border-zinc-800 p-4 rounded-3xl mb-6 print:hidden">
+              <h3 className="text-xs font-bold text-zinc-400 mb-3 uppercase tracking-wider">Filter Tanggal Laporan</h3>
+              <div className="flex items-center gap-2">
+                <input type="date" value={reportStartDate} onChange={(e) => setReportStartDate(e.target.value)} className="flex-1 bg-zinc-950/50 border border-zinc-800 rounded-xl px-3 py-2 text-sm text-white outline-none focus:border-indigo-500/50 transition [color-scheme:dark]" />
+                <span className="text-zinc-500 font-bold">-</span>
+                <input type="date" value={reportEndDate} onChange={(e) => setReportEndDate(e.target.value)} className="flex-1 bg-zinc-950/50 border border-zinc-800 rounded-xl px-3 py-2 text-sm text-white outline-none focus:border-indigo-500/50 transition [color-scheme:dark]" />
+              </div>
             </div>
+
+            <div className="hidden print:block mb-6 text-black">
+              <h1 className="text-2xl font-bold border-b pb-2 mb-2">Laporan Keuangan: {userName}</h1><p className="text-sm text-gray-600">Periode: {reportStartDate} s/d {reportEndDate}</p>
+            </div>
+            
             <section className="bg-zinc-900 border border-zinc-800 rounded-3xl p-6 print:bg-white print:border-gray-200 print:shadow-sm">
               <h3 className="text-sm font-bold text-zinc-400 mb-4 print:text-gray-500 uppercase tracking-wider">Ringkasan Arus Kas</h3>
               <div className="space-y-4">
                 <div className="flex justify-between items-center border-b border-zinc-800 pb-3 print:border-gray-200">
                   <div className="flex items-center gap-2"><ArrowDownCircle size={16} className="text-emerald-400" /><span className="text-sm font-semibold text-zinc-200 print:text-gray-700">Total Pemasukan</span></div>
-                  <span className="text-base font-bold text-emerald-400">Rp {currentIncome.toLocaleString("id-ID")}</span>
+                  <span className="text-base font-bold text-emerald-400">Rp {reportIncome.toLocaleString("id-ID")}</span>
                 </div>
                 <div className="flex justify-between items-center border-b border-zinc-800 pb-3 print:border-gray-200">
                   <div className="flex items-center gap-2"><ArrowUpCircle size={16} className="text-rose-500" /><span className="text-sm font-semibold text-zinc-200 print:text-gray-700">Total Pengeluaran</span></div>
-                  <span className="text-base font-bold text-rose-500">Rp {currentExpense.toLocaleString("id-ID")}</span>
+                  <span className="text-base font-bold text-rose-500">Rp {reportExpense.toLocaleString("id-ID")}</span>
                 </div>
                 <div className="flex justify-between items-center pt-1">
-                  <span className="text-sm font-bold text-zinc-400 print:text-gray-500">Sisa Bersih Bulan Ini</span>
-                  <span className={`text-xl font-black ${currentIncome - currentExpense >= 0 ? 'text-indigo-400' : 'text-rose-500'}`}>Rp {(currentIncome - currentExpense).toLocaleString("id-ID")}</span>
+                  <span className="text-sm font-bold text-zinc-400 print:text-gray-500">Sisa Bersih Terpilih</span>
+                  <span className={`text-xl font-black ${reportIncome - reportExpense >= 0 ? 'text-indigo-400' : 'text-rose-500'}`}>Rp {(reportIncome - reportExpense).toLocaleString("id-ID")}</span>
                 </div>
               </div>
             </section>
+            
             <section className="bg-zinc-900 border border-zinc-800 rounded-3xl p-6 print:bg-white print:border-gray-200 print:shadow-sm">
               <h3 className="text-sm font-bold text-zinc-400 mb-6 print:text-gray-500 uppercase tracking-wider">Rincian Pengeluaran Berdasarkan Kategori</h3>
-              {currentExpense === 0 ? <p className="text-xs text-zinc-500">Belum ada data pengeluaran bulan ini.</p> : (
+              {reportExpense === 0 ? <p className="text-xs text-zinc-500">Belum ada pengeluaran di rentang tanggal ini.</p> : (
                 <div className="space-y-5">
-                  {expenseByCategory.map((cat, idx) => {
-                    const percentage = Math.round((cat.amount / currentExpense) * 100);
+                  {reportExpenseByCategory.map((cat, idx) => {
+                    const percentage = Math.round((cat.amount / reportExpense) * 100);
                     return (
                       <div key={idx}>
                         <div className="flex justify-between items-end mb-2">
@@ -425,12 +658,11 @@ export default function Home() {
                 </div>
               )}
             </section>
+            
             <section className="print:hidden">
-              <h3 className="text-sm font-bold text-zinc-300 mb-3 px-1">Export Data Laporan</h3>
+              <h3 className="text-sm font-bold text-zinc-300 mb-3 px-1">Cetak Laporan</h3>
               <div className="grid grid-cols-1 gap-3">
-                <button onClick={handleExportCSV} className="flex items-center justify-between bg-zinc-900 hover:bg-zinc-800 border border-zinc-800 p-4 rounded-2xl transition"><div className="flex items-center gap-3"><div className="text-green-500 bg-green-500/10 p-2 rounded-xl"><Download size={20} /></div><div className="text-left"><p className="text-sm font-bold text-white">Export ke CSV / Excel</p><p className="text-[10px] text-zinc-500">Download data mentah spreadsheet</p></div></div><ChevronRight size={16} className="text-zinc-600" /></button>
-                <button onClick={exportData} className="flex items-center justify-between bg-zinc-900 hover:bg-zinc-800 border border-zinc-800 p-4 rounded-2xl transition"><div className="flex items-center gap-3"><div className="text-yellow-500 bg-yellow-500/10 p-2 rounded-xl"><FileJson size={20} /></div><div className="text-left"><p className="text-sm font-bold text-white">Export JSON</p><p className="text-[10px] text-zinc-500">Backup database lengkap</p></div></div><ChevronRight size={16} className="text-zinc-600" /></button>
-                <button onClick={handlePrintPDF} className="flex items-center justify-between bg-zinc-900 hover:bg-zinc-800 border border-zinc-800 p-4 rounded-2xl transition"><div className="flex items-center gap-3"><div className="text-blue-500 bg-blue-500/10 p-2 rounded-xl"><Printer size={20} /></div><div className="text-left"><p className="text-sm font-bold text-white">Cetak / Save as PDF</p><p className="text-[10px] text-zinc-500">Pilih "Save as PDF" di popup print</p></div></div><ChevronRight size={16} className="text-zinc-600" /></button>
+                <button onClick={handlePrintPDF} className="flex items-center justify-between bg-zinc-900 hover:bg-zinc-800 border border-zinc-800 p-4 rounded-2xl transition"><div className="flex items-center gap-3"><div className="text-blue-500 bg-blue-500/10 p-2 rounded-xl"><Printer size={20} /></div><div className="text-left"><p className="text-sm font-bold text-white">Cetak / Save as PDF</p><p className="text-[10px] text-zinc-500">Cetak laporan berdasarkan tanggal filter di atas</p></div></div><ChevronRight size={16} className="text-zinc-600" /></button>
               </div>
             </section>
           </main>
@@ -574,7 +806,7 @@ export default function Home() {
           <main className="px-5 pt-4 space-y-6 pb-10 print:hidden">
             <div className="flex justify-between items-center mb-2"><h2 className="text-lg font-bold text-white">Daftar Utang</h2><button onClick={handleOpenAddDebt} className="bg-zinc-800 text-yellow-500 text-xs px-3 py-1.5 rounded-full font-semibold border border-yellow-500/20 hover:bg-zinc-700 transition">+ Catat</button></div>
             <section>
-              <h3 className="text-sm font-bold text-rose-400 mb-3 px-1 border-b border-rose-500/20 pb-2 inline-block">Utang Saya</h3>
+              <h3 className="text-sm font-bold text-rose-400 mb-3 px-1 border-b border-rose-500/20 pb-2 inline-block">Utang Saya (Cicilan)</h3>
               {payableDebts.length === 0 ? (
                 <div className="bg-zinc-900 border border-zinc-800 rounded-2xl p-4 text-center"><p className="text-xs text-zinc-500">Alhamdulillah, lagi nggak ada utang bro.</p></div>
               ) : (
@@ -604,8 +836,9 @@ export default function Home() {
                 </div>
               )}
             </section>
+
             <section className="mt-6">
-              <h3 className="text-sm font-bold text-emerald-400 mb-3 px-1 border-b border-emerald-500/20 pb-2 inline-block">Uang Di Orang</h3>
+              <h3 className="text-sm font-bold text-emerald-400 mb-3 px-1 border-b border-emerald-500/20 pb-2 inline-block">Uang Di Orang (Piutang)</h3>
               {receivableDebts.length === 0 ? (
                 <div className="bg-zinc-900 border border-zinc-800 rounded-2xl p-4 text-center"><p className="text-xs text-zinc-500">Nggak ada duit lo yang dipinjem orang.</p></div>
               ) : (
@@ -614,19 +847,15 @@ export default function Home() {
                     <div key={d.id} onClick={() => handleEditDebtClick(d)} className="bg-zinc-900 border border-emerald-900/30 rounded-3xl p-5 relative overflow-hidden cursor-pointer hover:border-emerald-500/50 transition">
                       <div className="absolute -right-4 -top-4 text-emerald-500/5 pointer-events-none"><HandCoins size={100} /></div>
                       <div className="relative z-10">
-                        <div className="flex justify-between items-start mb-4">
+                        <div className="flex justify-between items-start">
                           <div>
-                            <h4 className="text-base font-bold text-white">{d.name}</h4><p className="text-xs text-zinc-400 mt-1">Belum Dibayar: <span className="font-bold text-white">Rp {d.amount.toLocaleString("id-ID")}</span></p>
+                            <h4 className="text-base font-bold text-white">{d.name}</h4>
+                            <p className="text-xs text-zinc-400 mt-1">Belum Dibayar: <span className="font-bold text-emerald-400">Rp {d.amount.toLocaleString("id-ID")}</span></p>
                           </div>
                           <div className="flex gap-2">
                             <button onClick={(e) => { e.stopPropagation(); handleOpenPayDebt(d); }} className="bg-emerald-600 hover:bg-emerald-500 text-white border border-emerald-500/50 px-3 py-1.5 rounded-full text-[10px] font-bold transition shadow-[0_0_10px_rgba(16,185,129,0.3)] flex items-center gap-1"><Banknote size={12} /> Terima</button>
                             <button onClick={(e) => { e.stopPropagation(); handleLunasinDebt(d.id); }} className="text-emerald-400 hover:text-white bg-emerald-500/10 hover:bg-emerald-500 border border-emerald-500/20 w-8 h-8 rounded-full transition flex items-center justify-center"><CheckCircle2 size={14} /></button>
                           </div>
-                        </div>
-                        <div className="flex items-center gap-3 bg-zinc-950/50 p-3 rounded-2xl border border-zinc-800">
-                          <div className="flex-1"><p className="text-[10px] text-zinc-500 mb-0.5">Cicilan dia per bulan</p><p className="text-sm font-bold text-emerald-400">Rp {d.installment.toLocaleString("id-ID")}</p></div>
-                          <div className="w-px h-8 bg-zinc-800"></div>
-                          <div className="flex-1 text-right"><p className="text-[10px] text-zinc-500 mb-0.5">Sisa Tenor</p><p className="text-sm font-bold text-white">{d.tenure} Bulan</p></div>
                         </div>
                       </div>
                     </div>
@@ -644,33 +873,99 @@ export default function Home() {
           </div>
         )}
 
-        {/* --- MODAL PENGATURAN --- */}
+        {/* --- MODAL PENGATURAN & AKUN --- */}
         {isSettingsModalOpen && (
           <div className="absolute inset-0 bg-black/60 backdrop-blur-sm z-50 flex items-end animate-in fade-in duration-200 print:hidden">
-            <div className="bg-[#121214] w-full rounded-t-[32px] p-6 relative border-t border-zinc-800 shadow-2xl h-auto flex flex-col slide-in-from-bottom-full pb-10">
+            <div className="bg-[#121214] w-full rounded-t-[32px] p-6 relative border-t border-zinc-800 shadow-2xl h-auto flex flex-col slide-in-from-bottom-full max-h-[90vh] overflow-y-auto pb-10 no-scrollbar">
               <div className="flex justify-between items-center mb-6">
                 <h3 className="text-lg font-bold text-white">Pengaturan Profil</h3>
                 <button onClick={() => setIsSettingsModalOpen(false)} className="text-zinc-500 hover:text-white bg-zinc-900 rounded-full p-1.5 transition"><X size={20} /></button>
               </div>
               <div className="space-y-6">
+                
+                {/* BAGIAN LOGIN / REGISTER CLOUD */}
+                <div className="bg-indigo-900/10 border border-indigo-500/20 p-5 rounded-3xl">
+                  <h4 className="text-sm font-bold text-indigo-400 mb-4 flex items-center gap-2"><Cloud size={16} /> Akun PetaUang Cloud</h4>
+                  
+                  {user ? (
+                    <div>
+                      <p className="text-xs text-zinc-400 mb-1">Status: Terhubung</p>
+                      <p className="text-lg font-bold text-white mb-4">User ID: <span className="text-indigo-400">{user.email.split('@')[0]}</span></p>
+                      
+                      <div className="mb-4">
+                        {!showPasswordMenu ? (
+                          <button onClick={() => setShowPasswordMenu(true)} className="flex items-center gap-2 text-xs font-semibold text-zinc-400 hover:text-white bg-zinc-900 px-4 py-2.5 rounded-xl border border-zinc-800 transition">
+                            <KeyRound size={14} /> Ganti Password
+                          </button>
+                        ) : (
+                          <div className="bg-zinc-900/80 p-3 rounded-xl border border-zinc-800 animate-in fade-in zoom-in-95 duration-200">
+                            <label className="text-xs text-zinc-400 block mb-2 font-medium">Masukkan Password Baru</label>
+                            <div className="flex gap-2">
+                              <input type="password" value={newPassword} onChange={(e) => setNewPassword(e.target.value)} placeholder="Password Baru" className="w-full bg-zinc-950/50 border border-zinc-800 rounded-lg px-3 py-2 text-sm text-white outline-none focus:border-indigo-500/50 transition" />
+                              <button onClick={handleChangePassword} className="bg-indigo-600 hover:bg-indigo-500 text-white text-xs px-4 py-2 rounded-lg font-bold transition">Update</button>
+                            </div>
+                            <button onClick={() => setShowPasswordMenu(false)} className="text-[10px] text-zinc-500 mt-2 hover:text-zinc-300">Batal</button>
+                          </div>
+                        )}
+                      </div>
+
+                      <div className="flex flex-col gap-2 mt-4">
+                        <button onClick={() => handleSyncToCloud(false)} disabled={isSyncing} className="w-full flex justify-center items-center gap-2 bg-indigo-600 hover:bg-indigo-500 text-white text-sm font-bold py-3.5 rounded-xl transition shadow-[0_0_15px_rgba(79,70,229,0.3)]">
+                          <Cloud size={18} /> {isSyncing ? "Proses Upload..." : "Simpan Manual ke Cloud"}
+                        </button>
+                      </div>
+                      <p className="text-[10px] text-emerald-400/80 mt-3 text-center flex items-center justify-center gap-1"><CheckCircle2 size={12}/> Aplikasi otomatis mencadangkan data saat ada perubahan.</p>
+                    </div>
+                  ) : (
+                    <div className="space-y-3">
+                      {isAdminMode ? (
+                         <div className="bg-rose-900/20 border border-rose-500/30 p-4 rounded-2xl mb-2 animate-in fade-in slide-in-from-top-4 duration-300">
+                            <h5 className="text-sm font-bold text-rose-400 flex items-center gap-2 mb-3"><Lock size={14}/> Mode Owner (Buat Akun)</h5>
+                            <input type="text" value={authUsername} onChange={(e) => setAuthUsername(e.target.value)} placeholder="Buat User ID Klien (cth: dika12)" className="w-full bg-zinc-950/80 border border-zinc-800 rounded-xl px-4 py-3 text-sm text-white outline-none mb-2 focus:border-rose-500/50 transition" />
+                            <input type="password" value={authPassword} onChange={(e) => setAuthPassword(e.target.value)} placeholder="Buat Password" className="w-full bg-zinc-950/80 border border-zinc-800 rounded-xl px-4 py-3 text-sm text-white outline-none mb-4 focus:border-rose-500/50 transition" />
+                            <button onClick={handleRegister} disabled={isAuthLoading} className="w-full bg-rose-600 hover:bg-rose-500 text-white text-xs font-bold py-3.5 rounded-xl transition shadow-[0_4px_15px_rgba(225,29,72,0.3)]">
+                              {isAuthLoading ? "Loading..." : "Daftarkan Klien Ini"}
+                            </button>
+                         </div>
+                      ) : (
+                        <>
+                          <input type="text" value={authUsername} onChange={(e) => setAuthUsername(e.target.value)} placeholder="Masukkan User ID" className="w-full bg-zinc-950/50 border border-zinc-800 rounded-xl px-4 py-3 text-sm text-white outline-none focus:border-indigo-500/50 transition" />
+                          <input type="password" value={authPassword} onChange={(e) => setAuthPassword(e.target.value)} placeholder="Password rahasia" className="w-full bg-zinc-950/50 border border-zinc-800 rounded-xl px-4 py-3 text-sm text-white outline-none focus:border-indigo-500/50 transition" />
+                          <div className="mt-2">
+                            <button onClick={handleLogin} disabled={isAuthLoading} className="w-full bg-indigo-600 hover:bg-indigo-500 text-white text-sm font-bold py-3.5 rounded-xl transition shadow-[0_4px_15px_rgba(79,70,229,0.3)]">
+                              {isAuthLoading ? "Loading..." : "Masuk ke Akun Cloud"}
+                            </button>
+                          </div>
+                        </>
+                      )}
+
+                      <div className="flex justify-between items-center border-t border-zinc-800 pt-4 mt-2">
+                         <button onClick={toggleAdminMode} className="text-[10px] text-zinc-600 hover:text-zinc-400 font-semibold px-2 py-1 rounded hover:bg-zinc-900 transition">{isAdminMode ? "Tutup Mode Owner" : "Login Admin"}</button>
+                         <p className="text-[10px] text-zinc-500 text-right">Belum punya akun? Hubungi Admin.</p>
+                      </div>
+                    </div>
+                  )}
+                </div>
+
                 <div>
-                  <label className="text-xs text-zinc-500 block mb-1.5 font-medium">Ubah Nama Profil</label>
+                  <label className="text-xs text-zinc-500 block mb-1.5 font-medium">Ubah Nama Profil (Lokal)</label>
                   <input type="text" value={tempUserName} onChange={(e) => setTempUserName(e.target.value)} placeholder="cth. Dompet Ryanhar" className="w-full bg-zinc-900/50 border border-zinc-800 rounded-2xl px-4 py-3.5 text-sm text-white outline-none focus:border-yellow-500/50 transition placeholder:text-zinc-700" />
                 </div>
                 <button onClick={handleSaveSettings} className="w-full bg-yellow-500 hover:bg-yellow-400 text-black font-bold py-3.5 rounded-2xl transition-all shadow-[0_4px_15px_rgba(234,179,8,0.2)]">
                   Simpan Perubahan
                 </button>
-                <div className="border-t border-zinc-800 pt-6 mt-2">
-                  <h4 className="text-sm font-bold text-yellow-500 mb-2 flex items-center gap-2"><Upload size={16} /> Import Backup Data</h4>
-                  <p className="text-[10px] text-zinc-500 mb-4">Pilih file backup (.json) yang pernah didownload untuk memulihkan total seluruh data finansial.</p>
-                  <label className="w-full bg-zinc-900 hover:bg-zinc-800 border border-zinc-800 text-zinc-300 font-bold py-3.5 rounded-2xl transition-all flex items-center justify-center gap-2 cursor-pointer text-sm">
-                    <Download size={16} className="rotate-180 text-yellow-500" /> Pilih File Backup JSON
-                    <input type="file" accept=".json" onChange={handleFileImport} className="hidden" />
-                  </label>
-                </div>
-                <div className="border-t border-zinc-800 pt-6 mt-2">
+                
+                {/* ZONA BERBAHAYA (Termasuk Logout sekarang ada di sini) */}
+                <div className="border-t border-rose-900/30 pt-6 mt-2">
                   <h4 className="text-sm font-bold text-rose-500 mb-2 flex items-center gap-2"><AlertTriangle size={16} /> Zona Berbahaya</h4>
-                  <p className="text-[10px] text-zinc-500 mb-4">Hapus seluruh data Transaksi, Laporan, Utang, dan Rutin secara permanen. (Dompet tidak akan terhapus).</p>
+                  <p className="text-[10px] text-zinc-500 mb-4">Aksi di bawah ini bakal memengaruhi akses dan data aplikasi lu di perangkat ini.</p>
+                  
+                  {user && (
+                    <button onClick={handleLogout} className="w-full bg-zinc-900 hover:bg-zinc-800 border border-zinc-800 text-zinc-300 text-xs font-bold py-3.5 rounded-2xl transition mb-3 flex items-center justify-center gap-2">
+                      Keluar dari Akun (Logout)
+                    </button>
+                  )}
+
                   <button onClick={handleResetData} className="w-full bg-rose-500/10 hover:bg-rose-500 text-rose-500 hover:text-white border border-rose-500/20 font-bold py-3.5 rounded-2xl transition-all">
                     Hapus Semua Data
                   </button>
@@ -884,32 +1179,47 @@ export default function Home() {
               <div className="flex-1 overflow-y-auto no-scrollbar space-y-4 pb-20">
                 <div>
                   <label className="text-xs text-zinc-500 block mb-1.5 font-medium">{debtType === "payable" ? "Nama Pinjaman (cth. KPR BCA)" : "Siapa yang ngutang? (cth. Dika)"}</label>
-                  <input type="text" value={debtName} onChange={(e) => setDebtName(e.target.value)} placeholder="cth. Pinjol" className="w-full bg-zinc-900/50 border border-zinc-800 rounded-2xl px-4 py-3.5 text-sm text-white outline-none focus:border-yellow-500/50 transition placeholder:text-zinc-700" />
+                  <input type="text" value={debtName} onChange={(e) => setDebtName(e.target.value)} placeholder={debtType === "payable" ? "cth. Pinjol" : "Nama Temen"} className="w-full bg-zinc-900/50 border border-zinc-800 rounded-2xl px-4 py-3.5 text-sm text-white outline-none focus:border-yellow-500/50 transition placeholder:text-zinc-700" />
                 </div>
-                <div className="grid grid-cols-2 gap-4">
+                
+                {debtType === "payable" ? (
+                  <>
+                    <div className="grid grid-cols-2 gap-4">
+                      <div>
+                        <label className="text-xs text-zinc-500 block mb-1.5 font-medium">Tagihan per Bulan</label>
+                        <div className="flex items-center bg-zinc-900/50 rounded-2xl border border-zinc-800 px-4 py-3.5 focus-within:border-yellow-500/50 transition">
+                          <span className="text-zinc-500 font-semibold mr-1 text-sm">Rp</span>
+                          <input type="text" inputMode="numeric" value={debtInstallmentInput} onChange={(e) => setDebtInstallmentInput(formatRupiah(e.target.value))} placeholder="0" className="bg-transparent w-full text-sm font-bold text-white outline-none placeholder:text-zinc-700" />
+                        </div>
+                      </div>
+                      <div>
+                        <label className="text-xs text-zinc-500 block mb-1.5 font-medium">Tenor (Bulan)</label>
+                        <div className="flex items-center bg-zinc-900/50 rounded-2xl border border-zinc-800 px-4 py-3.5 focus-within:border-yellow-500/50 transition">
+                          <input type="number" value={debtTenureInput} onChange={(e) => setDebtTenureInput(e.target.value)} placeholder="0" className="bg-transparent w-full text-sm font-bold text-white outline-none placeholder:text-zinc-700 text-center" />
+                          <span className="text-zinc-500 font-semibold ml-2 text-xs">Bulan</span>
+                        </div>
+                      </div>
+                    </div>
+                    <div className="pt-2">
+                      <label className="text-xs text-zinc-500 block mb-1.5 font-medium">Total Nominal Pinjaman <span className="text-[10px] bg-zinc-800 px-1 py-0.5 rounded text-zinc-400">Otomatis</span></label>
+                      <div className="flex items-center bg-zinc-950/50 rounded-2xl border border-zinc-800 px-4 py-3.5 cursor-not-allowed">
+                        <span className="text-zinc-600 font-semibold mr-2 text-lg">Rp</span>
+                        <input type="text" readOnly value={debtAmountInput} placeholder="0" className="bg-transparent w-full text-xl font-bold text-zinc-400 outline-none cursor-not-allowed" />
+                      </div>
+                      <p className="text-[10px] text-zinc-600 mt-1">Dihitung otomatis: Tagihan per Bulan × Tenor.</p>
+                    </div>
+                  </>
+                ) : (
                   <div>
-                    <label className="text-xs text-zinc-500 block mb-1.5 font-medium">Tagihan per Bulan</label>
-                    <div className="flex items-center bg-zinc-900/50 rounded-2xl border border-zinc-800 px-4 py-3.5 focus-within:border-yellow-500/50 transition">
+                    <label className="text-xs text-zinc-500 block mb-1.5 font-medium">Total Uang Yang Dipinjam</label>
+                    <div className="flex items-center bg-zinc-900/50 rounded-2xl border border-zinc-800 px-4 py-3.5 focus-within:border-emerald-500/50 transition">
                       <span className="text-zinc-500 font-semibold mr-1 text-sm">Rp</span>
-                      <input type="text" inputMode="numeric" value={debtInstallmentInput} onChange={(e) => setDebtInstallmentInput(formatRupiah(e.target.value))} placeholder="0" className="bg-transparent w-full text-sm font-bold text-white outline-none placeholder:text-zinc-700" />
+                      <input type="text" inputMode="numeric" value={debtAmountInput} onChange={(e) => setDebtAmountInput(formatRupiah(e.target.value))} placeholder="0" className="bg-transparent w-full text-xl font-bold text-white outline-none placeholder:text-zinc-700" />
                     </div>
+                    <p className="text-[10px] text-zinc-600 mt-2">Bebas masukin berapapun nominal piutangnya.</p>
                   </div>
-                  <div>
-                    <label className="text-xs text-zinc-500 block mb-1.5 font-medium">Tenor (Bulan)</label>
-                    <div className="flex items-center bg-zinc-900/50 rounded-2xl border border-zinc-800 px-4 py-3.5 focus-within:border-yellow-500/50 transition">
-                      <input type="number" value={debtTenureInput} onChange={(e) => setDebtTenureInput(e.target.value)} placeholder="0" className="bg-transparent w-full text-sm font-bold text-white outline-none placeholder:text-zinc-700 text-center" />
-                      <span className="text-zinc-500 font-semibold ml-2 text-xs">Bulan</span>
-                    </div>
-                  </div>
-                </div>
-                <div className="pt-2">
-                  <label className="text-xs text-zinc-500 block mb-1.5 font-medium">Total Nominal Pinjaman <span className="text-[10px] bg-zinc-800 px-1 py-0.5 rounded text-zinc-400">Otomatis</span></label>
-                  <div className="flex items-center bg-zinc-950/50 rounded-2xl border border-zinc-800 px-4 py-3.5 cursor-not-allowed">
-                    <span className="text-zinc-600 font-semibold mr-2 text-lg">Rp</span>
-                    <input type="text" readOnly value={debtAmountInput} placeholder="0" className="bg-transparent w-full text-xl font-bold text-zinc-400 outline-none cursor-not-allowed" />
-                  </div>
-                  <p className="text-[10px] text-zinc-600 mt-1">Dihitung otomatis: Tagihan per Bulan × Tenor.</p>
-                </div>
+                )}
+
               </div>
               <div className="absolute bottom-0 left-0 right-0 p-6 bg-gradient-to-t from-[#121214] via-[#121214] to-transparent">
                 <button onClick={handleSaveDebt} className={`w-full text-white font-bold py-4 rounded-2xl transition-all shadow-[0_4px_15px_rgba(0,0,0,0.2)] ${debtType === "payable" ? "bg-rose-500 hover:bg-rose-400" : "bg-emerald-500 hover:bg-emerald-400"}`}>
@@ -925,22 +1235,22 @@ export default function Home() {
           <div className="absolute inset-0 bg-black/60 backdrop-blur-sm z-50 flex items-center justify-center p-5 animate-in fade-in duration-200 print:hidden">
             <div className="bg-[#121214] w-full max-w-sm rounded-3xl p-6 relative border border-indigo-500/30 shadow-[0_0_30px_rgba(99,102,241,0.15)] scale-in-center">
               <div className="flex justify-between items-center mb-6">
-                <h3 className="text-lg font-bold text-white">Bayar Cicilan Bulan Ini</h3>
+                <h3 className="text-lg font-bold text-white">Catat Pembayaran</h3>
                 <button onClick={() => setIsPayDebtModalOpen(false)} className="text-zinc-500 hover:text-white bg-zinc-900 rounded-full p-1.5 transition"><X size={20} /></button>
               </div>
               <div className="mb-4">
-                <label className="text-xs text-zinc-500 block mb-1.5 font-medium">Nominal Cicilan</label>
+                <label className="text-xs text-zinc-500 block mb-1.5 font-medium">Nominal Pembayaran</label>
                 <div className="flex items-center bg-zinc-900/50 rounded-2xl border border-zinc-800 px-4 py-3.5 focus-within:border-indigo-500/50 transition">
                   <span className="text-zinc-500 font-semibold mr-2">Rp</span>
                   <input type="text" inputMode="numeric" value={payDebtAmountInput} onChange={(e) => setPayDebtAmountInput(formatRupiah(e.target.value))} className="bg-transparent w-full text-xl font-bold text-white outline-none placeholder:text-zinc-700" autoFocus />
                 </div>
               </div>
               <div className="mb-6">
-                <label className="text-xs text-zinc-500 block mb-1.5 font-medium">Pilih Dompet</label>
+                <label className="text-xs text-zinc-500 block mb-1.5 font-medium">Masuk/Keluar dari Dompet</label>
                 <select value={payDebtWallet} onChange={(e) => setPayDebtWallet(e.target.value)} className="w-full bg-zinc-900/50 border border-zinc-800 rounded-2xl px-4 py-3.5 text-sm text-white outline-none focus:border-indigo-500/50 transition appearance-none">
                   {wallets.map((w) => (<option key={w.id} value={w.name}>🏦 {w.name}</option>))}
                 </select>
-                <p className="text-[10px] text-zinc-500 mt-2">Saldo dompet ini akan otomatis dipotong dan masuk ke riwayat transaksi.</p>
+                <p className="text-[10px] text-zinc-500 mt-2">Uang di dompet ini akan otomatis menyesuaikan.</p>
               </div>
               <button onClick={handleSavePayDebt} className="w-full bg-indigo-600 hover:bg-indigo-500 text-white font-bold py-3.5 rounded-2xl transition-all shadow-[0_4px_15px_rgba(79,70,229,0.3)]">Konfirmasi Pembayaran</button>
             </div>
