@@ -921,7 +921,7 @@ export default function Home() {
                       {isAdminMode ? (
                          <div className="bg-rose-900/20 border border-rose-500/30 p-4 rounded-2xl mb-2 animate-in fade-in slide-in-from-top-4 duration-300">
                             <h5 className="text-sm font-bold text-rose-400 flex items-center gap-2 mb-3"><Lock size={14}/> Mode Owner (Buat Akun)</h5>
-                            <input type="text" value={authUsername} onChange={(e) => setAuthUsername(e.target.value)} placeholder="Buat User ID Klien (cth: dika12)" className="w-full bg-zinc-950/80 border border-zinc-800 rounded-xl px-4 py-3 text-sm text-white outline-none mb-2 focus:border-rose-500/50 transition" />
+                            <input type="text" value={authUsername} onChange={(e) => setAuthUsername(e.target.value)} placeholder="Buat User ID Klien (cth: Mutiara19)" className="w-full bg-zinc-950/80 border border-zinc-800 rounded-xl px-4 py-3 text-sm text-white outline-none mb-2 focus:border-rose-500/50 transition" />
                             <input type="password" value={authPassword} onChange={(e) => setAuthPassword(e.target.value)} placeholder="Buat Password" className="w-full bg-zinc-950/80 border border-zinc-800 rounded-xl px-4 py-3 text-sm text-white outline-none mb-4 focus:border-rose-500/50 transition" />
                             <button onClick={handleRegister} disabled={isAuthLoading} className="w-full bg-rose-600 hover:bg-rose-500 text-white text-xs font-bold py-3.5 rounded-xl transition shadow-[0_4px_15px_rgba(225,29,72,0.3)]">
                               {isAuthLoading ? "Loading..." : "Daftarkan Klien Ini"}
@@ -958,7 +958,7 @@ export default function Home() {
                 {/* ZONA BERBAHAYA (Termasuk Logout sekarang ada di sini) */}
                 <div className="border-t border-rose-900/30 pt-6 mt-2">
                   <h4 className="text-sm font-bold text-rose-500 mb-2 flex items-center gap-2"><AlertTriangle size={16} /> Zona Berbahaya</h4>
-                  <p className="text-[10px] text-zinc-500 mb-4">Aksi di bawah ini bakal memengaruhi akses dan data aplikasi lu di perangkat ini.</p>
+                  <p className="text-[10px] text-zinc-500 mb-4">Aksi di bawah ini bakal memengaruhi akses dan data aplikasi di perangkat ini.</p>
                   
                   {user && (
                     <button onClick={handleLogout} className="w-full bg-zinc-900 hover:bg-zinc-800 border border-zinc-800 text-zinc-300 text-xs font-bold py-3.5 rounded-2xl transition mb-3 flex items-center justify-center gap-2">
@@ -1012,7 +1012,7 @@ export default function Home() {
                 </div>
                 <div>
                   <label className="text-xs text-zinc-500 block mb-1.5 font-medium">Catatan</label>
-                  <input type="text" value={note} onChange={(e) => setNote(e.target.value)} placeholder="cth. Gaji Bulanan" className="w-full bg-zinc-900/50 border border-zinc-800 rounded-2xl px-4 py-3.5 text-sm text-white outline-none focus:border-yellow-500/50 transition placeholder:text-zinc-700" />
+                  <input type="text" value={note} onChange={(e) => setNote(e.target.value)} placeholder="cth. Starbucks, Gaji Bulanan" className="w-full bg-zinc-900/50 border border-zinc-800 rounded-2xl px-4 py-3.5 text-sm text-white outline-none focus:border-yellow-500/50 transition placeholder:text-zinc-700" />
                 </div>
                 <div>
                   <label className="text-xs text-zinc-500 block mb-2 font-medium">Kategori</label>
