@@ -316,72 +316,90 @@ export default function Home() {
     }
   };
 
-  // --- FUNGSI SYNC KE CLOUD (UPLOAD) ---
+// --- FUNGSI SYNC KE CLOUD (ANTI-BADAI FAKE ID) ---
   const handleSyncToCloud = async (isSilent = false) => {
     if (!user) return;
     if (!isSilent) setIsSyncing(true);
 
+    // Fungsi kecil buat ngecek apakah ID-nya UUID asli atau abal-abal
+    const isValidUUID = (id: string) => /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(id);
+
     try {
       let dbWallets: any[] = [];
 
+      // 1. SYNC DOMPET
       if (wallets.length > 0) {
-        const walletsData = wallets.map(w => ({
-          id: w.id, user_id: user.id, name: w.name
-        }));
+        const walletsData = wallets.map(w => {
+          const payload: any = { user_id: user.id, name: w.name };
+          if (isValidUUID(w.id)) payload.id = w.id; // Cuma kirim ID kalau formatnya UUID asli
+          return payload;
+        });
+
         const { data, error } = await supabase.from('wallets').upsert(walletsData).select('id, name');
         if (error) throw new Error("Gagal upload dompet: " + error.message);
-        dbWallets = data || walletsData; 
+        dbWallets = data || []; 
       } else {
         if(!isSilent) throw new Error("Lu belum punya dompet sama sekali. Bikin dompet dulu 1 biji minimal!");
         else return;
       }
 
+      // 2. SYNC TRANSAKSI
       if (transactions.length > 0) {
         const txsData = transactions.map(tx => {
           const matchedWallet = dbWallets.find(w => w.name === tx.wallet);
-          return {
-            id: tx.id, user_id: user.id, 
+          const payload: any = {
+            user_id: user.id, 
             wallet_id: matchedWallet ? matchedWallet.id : dbWallets[0].id, 
-            type: tx.type, amount: tx.amount, category: tx.category, 
-            description: tx.note, date: tx.date
+            type: tx.type, amount: tx.amount, category: tx.category, description: tx.note, date: tx.date
           };
+          if (isValidUUID(tx.id)) payload.id = tx.id;
+          return payload;
         });
         const { error } = await supabase.from('transactions').upsert(txsData);
         if (error) throw new Error("Gagal upload transaksi: " + error.message);
       }
 
+      // 3. SYNC TARGET (GOALS)
       if (targets.length > 0) {
-        const targetsData = targets.map(t => ({
-          id: t.id, user_id: user.id, name: t.name, target_amount: t.targetAmount, collected_amount: t.collectedAmount
-        }));
+        const targetsData = targets.map(t => {
+          const payload: any = { user_id: user.id, name: t.name, target_amount: t.targetAmount, collected_amount: t.collectedAmount };
+          if (isValidUUID(t.id)) payload.id = t.id;
+          return payload;
+        });
         const { error } = await supabase.from('targets').upsert(targetsData);
         if (error) throw new Error("Gagal upload target: " + error.message);
       }
 
+      // 4. SYNC UTANG
       if (debts.length > 0) {
-        const debtsData = debts.map(d => ({
-          id: d.id, user_id: user.id, type: d.type, name: d.name, amount: d.amount, installment: d.installment, tenure: d.tenure
-        }));
+        const debtsData = debts.map(d => {
+          const payload: any = { user_id: user.id, type: d.type, name: d.name, amount: d.amount, installment: d.installment, tenure: d.tenure };
+          if (isValidUUID(d.id)) payload.id = d.id;
+          return payload;
+        });
         const { error } = await supabase.from('debts').upsert(debtsData);
         if (error) throw new Error("Gagal upload utang: " + error.message);
       }
 
+      // 5. SYNC RUTIN
       if (recurrings.length > 0) {
         const recData = recurrings.map(r => {
           const matchedWallet = dbWallets.find(w => w.name === r.wallet);
-          return {
-            id: r.id, user_id: user.id, type: r.type, amount: r.amount, day: r.day,
+          const payload: any = {
+            user_id: user.id, type: r.type, amount: r.amount, day: r.day,
             wallet_id: matchedWallet ? matchedWallet.id : dbWallets[0].id, 
             category: r.category, note: r.note, last_processed_month: r.lastProcessedMonth
           };
+          if (isValidUUID(r.id)) payload.id = r.id;
+          return payload;
         });
         const { error } = await supabase.from('recurrings').upsert(recData);
         if (error) throw new Error("Gagal upload rutin: " + error.message);
       }
 
-      if (!isSilent) alert("GOKIL! Semua data lokal lu udah terbang dan tersimpan aman di Cloud Supabase!");
+      if (!isSilent) alert("Mantap! Data berhasil disinkronkan ke Cloud.");
     } catch (err: any) {
-      if (!isSilent) alert("Waduh, gagal sync bro: " + err.message);
+      if (!isSilent) alert(err.message);
     } finally {
       if (!isSilent) setIsSyncing(false);
     }
